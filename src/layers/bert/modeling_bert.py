@@ -1928,7 +1928,7 @@ class BertForImageCaptioning(BertPreTrainedModel):
             # full_len = self.max_seq_len + self.od_labels_len + self.img_seq_len + 32
 
             #加上obj region的mask
-            full_len = self.max_seq_len + self.od_labels_len + self.img_seq_len + 32 + 220
+            full_len = self.max_seq_len + self.od_labels_len + self.img_seq_len + 32 + 1 + 220#在frame的左侧加一个[Sep]
 
             assert self.full_attention_mask.shape == (batch_size,
                     full_len, full_len)

@@ -155,16 +155,23 @@ class VideoFeatureExtractor:
         indices_mapping = []
         for idx, (frame, bboxes) in enumerate(zip(frames, bboxes_list)):
             try:
+                h, w = frame.shape[:2]
                 for bbox in bboxes:
                     xmin, ymin, xmax, ymax = bbox["bbox"]
+                    xmin_normalized = xmin / w
+                    ymin_normalized = ymin / h
+                    xmax_normalized = xmax / w
+                    ymax_normalized = ymax / h
+
                     frame_image = Image.fromarray(frame.cpu().numpy().astype("uint8"), "RGB").crop((xmin, ymin, xmax, ymax))
                     processed_image = self.preprocess(frame_image).to(self.device)
                     processed_images.append(processed_image.unsqueeze(0).half())  # Add batch dimension
-                    bbox_features = torch.tensor(bbox["bbox"], dtype=torch.half, device=self.device)
+                    bbox_features = torch.tensor([xmin_normalized, ymin_normalized, xmax_normalized, ymax_normalized], 
+                                             dtype=torch.half, device=self.device)
                     bbox_features_list.append(bbox_features.unsqueeze(0))
                     indices_mapping.append(idx)#记录被处理的region的索引，异常的不被记录
             except Exception as e:
-                print(f"Error preprocessing image regions: {e}")
+                # print(f"Error preprocessing image regions: {e}")
                 continue
         if not processed_images:  # If no valid images, return empty list
             return [], []
@@ -196,26 +203,7 @@ class VideoFeatureExtractor:
         tokens, indices_mapping = self.preprocess_and_extract_features(frames, obj_dic_filtered.values())
         mapped_frame_indices = [frame_indices[i] for i in indices_mapping]
         return self.prepare_output(tokens, mapped_frame_indices)
-    # def get_region_feats(self, video_id, raw_frames):
-    #     with open(f'datasets/MSRVTT-v2/objects/32frames/filtered/{video_id}.json', 'r') as f:
-    #         obj_dic_filtered = json.load(f)
 
-    #     region_tokens = []
-    #     frame_indices = []
-
-    #     for frame_idx, bboxes in obj_dic_filtered.items():
-    #         try:
-    #             frame = raw_frames[int(frame_idx) - 1]
-    #             frame = torch.permute(frame, (1, 2, 0))  # Adjust frame dimensions if necessary
-    #         except Exception as e:
-    #             print(f"Error processing frame {frame_idx}: {e}")
-    #             continue
-
-    #         tokens = self.preprocess_and_extract_features(frame, bboxes)
-    #         region_tokens.extend(tokens)
-    #         frame_indices.extend([int(frame_idx) - 1] * len(tokens))
-
-    #     return self.prepare_output(region_tokens, frame_indices)
 
     def get_region_feats(self, video_id, raw_frames):
         with open(f'datasets/MSRVTT-v2/objects/32frames/filtered/{video_id}.json', 'r') as f:
@@ -229,7 +217,7 @@ class VideoFeatureExtractor:
                 frames.append(frame)
                 frame_indices.extend([int(frame_idx) - 1] * len(bboxes))
             except Exception as e:
-                print(f"Error processing frame {frame_idx}: {e}")
+                # print(f"Error processing frame {frame_idx}: {e}")
                 continue
         tokens = self.preprocess_and_extract_features(frames, obj_dic_filtered.values())
         return self.prepare_output(tokens, frame_indices)
@@ -306,7 +294,7 @@ class MultimodalTransformer(torch.nn.Module):
         #     "./models/word2vec/GoogleNews-vectors-negative300.bin.gz", binary=True
         # )
 
-        self.resnet = models.resnet101(pretrained=True)
+        self.resnet = models.resnet50(pretrained=True)
         # 移除avgpool和fc层
         self.resnet = torch.nn.Sequential(*list(self.resnet.children())[:-2])
         self.resnet.eval()
@@ -322,14 +310,16 @@ class MultimodalTransformer(torch.nn.Module):
         self.mask_token_id = -1
         self.max_img_seq_length = args.max_img_seq_length
 
-        self.max_frames_cap_num = args.max_frames_cap_num
+        self.max_frames_cap_num = args.max_frames_cap_num + 1#['sep']
+
+        self.max_region_length = 220#设置第一个token为sep
 
         # learn soft attention mask
         self.learn_mask_enabled = getattr(args, "learn_mask_enabled", False)
         self.sparse_mask_soft2hard = getattr(args, "sparse_mask_soft2hard", False)
 
         if self.learn_mask_enabled == True:
-            self.learn_vid_att = torch.nn.Embedding(args.max_img_seq_length*args.max_img_seq_length,1)#Embedding[784*784,1]
+            self.learn_vid_att = torch.nn.Embedding((args.max_img_seq_length+32+1+220)*(args.max_img_seq_length+32+1+220),1)#Embedding[784*784,1]
 
             # self.learn_vid_att = torch.nn.Embedding((args.max_img_seq_length + args.max_frames_cap_num)*(args.max_img_seq_length + args.max_frames_cap_num),1)
             #不对obj_region使用mask
@@ -378,25 +368,38 @@ class MultimodalTransformer(torch.nn.Module):
         frames_sentence_feats_enc = self.frames_cap_temporal_enc(
             self.pos_emb(frames_sentence_feats)
         )  # shape=[6,32,768]
+        
+        sep_feature = torch.zeros((1, 768)).to(torch.device("cuda")).half() # [SEP]特征，维度要与f兼容
+        sep_feature_expanded = sep_feature.unsqueeze(0).expand(frames_sentence_feats_enc.shape[0],1,-1)
+        frames_sentence_feats_enc = torch.cat([sep_feature_expanded,frames_sentence_feats_enc],dim=1)
         kwargs["frames_sentence_feats_enc"] = frames_sentence_feats_enc
 
-        # frames_caps = kwargs["frames_cap"]  # shape=[32,n]
+        # frames_caps = kwargs["frames_cap"]  # shape=[32+1,n]
         video_ids = kwargs["video_id"]
         raw_frames = kwargs["raw_frames"]
+
+        
+        sep_mask = torch.tensor([False], dtype=torch.bool).to(torch.device("cuda")) # 对应的mask值
+
         region_feats = []
         region_attention_mask = []
-        for i in range(0, len(video_ids)):
-            f,m = self.video_feature_extractor.get_region_feats(video_id=video_ids[i],raw_frames=raw_frames[i])
-            # f = torch.zeros((220,768)).to(torch.device("cuda")).half()
-            # m = torch.full((220,),True,dtype=torch.bool).to(torch.device("cuda"))
-            region_feats.append(f)
-            region_attention_mask.append(m)
+        for i in range(len(video_ids)):
+            f, m = self.video_feature_extractor.get_region_feats(video_id=video_ids[i], raw_frames=raw_frames[i])
+            # 将[SEP]特征和False添加到f和m的前面
+            f_with_sep = torch.cat([sep_feature, f[:-1]], dim=0) # 将[SEP]特征向量添加到f的前面，并从尾部截断一个向量
+            m_with_sep = torch.cat([sep_mask, m[:-1]], dim=0) # 将False添加到m的前面，并从尾部截断一个元素
+    
+            region_feats.append(f_with_sep)
+            region_attention_mask.append(m_with_sep)
+
+        # 将列表转换为tensor
         region_attention_mask = torch.stack(region_attention_mask)
         region_feats = torch.stack(region_feats)
 
-        for i in range(0,region_attention_mask.shape[0]):
-            if region_attention_mask[i][0]==True:
-                region_attention_mask[i][0]=False#将region的第一个token设置为始终可见，不然可能会报错，希望这样的更改对结果的影响不会太大
+
+        # for i in range(0,region_attention_mask.shape[0]):
+        #     if region_attention_mask[i][0]==True:
+        #         region_attention_mask[i][0]=False#将region的第一个token设置为始终可见(False)，对应[sep]token,不然可能会报错，希望这样的更改对结果的影响不会太大
                 
         region_feats = self.obj_region_enc(region_feats,src_key_padding_mask=region_attention_mask)
         kwargs["region_feats"] = region_feats
@@ -414,13 +417,31 @@ class MultimodalTransformer(torch.nn.Module):
         if self.trans_encoder.bert.encoder.output_attentions:
             self.trans_encoder.bert.encoder.set_output_attentions(False)
 
-        # 原始SwinBERT稀疏注意力mask
+        # # 原始SwinBERT稀疏注意力mask
+        # if self.learn_mask_enabled:
+        #     kwargs['attention_mask'] = kwargs['attention_mask'].float()
+        #     vid_att_len = self.max_img_seq_length
+        #     learn_att = self.learn_vid_att.weight.reshape(vid_att_len,vid_att_len)
+        #     learn_att = self.sigmoid(learn_att)#shape=[784,784]
+        #     diag_mask = torch.diag(torch.ones(vid_att_len)).cuda()#shape=[784,784],初始化一个对角矩阵，对角线为1，其余部分为0
+        #     video_attention = (1. - diag_mask)*learn_att#这一操作移除了自注意力
+        #     learn_att = diag_mask + video_attention#这一操作又将自注意力设置为了1
+        #     #learn_att 成为了一个融合了原始自注意力（对角线上的元素）和调整后的元素之间的注意力（非对角线元素）的矩阵。这样的设计可以让模型在保留对自身信息的关注的同时，也考虑到了其他元素之间的关系。这种方法在处理序列数据时，特别是在视觉和语言任务中，通常能够提高模型的性能。
+        #     if self.sparse_mask_soft2hard:#论文给的数据使用soft的mask更多的时候能取得更好的效果
+        #         learn_att = (learn_att>=0.5)*1.0
+        #         learn_att = learn_att.cuda()
+        #         learn_att.requires_grad = False
+        #     kwargs['attention_mask'][:, -vid_att_len::, -vid_att_len::] = learn_att#attention mask shape = [batch_size,784+50,784+50]
+        
+        #使用帧描述信息和region对应的稀疏注意力mask
         if self.learn_mask_enabled:
             kwargs['attention_mask'] = kwargs['attention_mask'].float()
-            vid_att_len = self.max_img_seq_length
-            learn_att = self.learn_vid_att.weight.reshape(vid_att_len,vid_att_len)
+
+            vid_cap_att_len = self.max_img_seq_length + self.max_frames_cap_num + self.max_region_length
+            
+            learn_att = self.learn_vid_att.weight.reshape(vid_cap_att_len,vid_cap_att_len)
             learn_att = self.sigmoid(learn_att)#shape=[784,784]
-            diag_mask = torch.diag(torch.ones(vid_att_len)).cuda()#shape=[784,784],初始化一个对角矩阵，对角线为1，其余部分为0
+            diag_mask = torch.diag(torch.ones(vid_cap_att_len)).cuda()#shape=[784,784],初始化一个对角矩阵，对角线为1，其余部分为0
             video_attention = (1. - diag_mask)*learn_att#这一操作移除了自注意力
             learn_att = diag_mask + video_attention#这一操作又将自注意力设置为了1
             #learn_att 成为了一个融合了原始自注意力（对角线上的元素）和调整后的元素之间的注意力（非对角线元素）的矩阵。这样的设计可以让模型在保留对自身信息的关注的同时，也考虑到了其他元素之间的关系。这种方法在处理序列数据时，特别是在视觉和语言任务中，通常能够提高模型的性能。
@@ -428,19 +449,37 @@ class MultimodalTransformer(torch.nn.Module):
                 learn_att = (learn_att>=0.5)*1.0
                 learn_att = learn_att.cuda()
                 learn_att.requires_grad = False
-            kwargs['attention_mask'][:, -vid_att_len::, -vid_att_len::] = learn_att#attention mask shape = [batch_size,784+50,784+50]
+            kwargs['attention_mask'][:, -vid_cap_att_len::, -vid_cap_att_len::] = learn_att
 
             #串联上frames_cap(32)和obj_regions(32)的mask依照以下原则:
             #1.caption token, img token可以看到所有frame token, 有效的region token
             #2.frame token，有效的region token 能看到img token，有效的 rgion token，frame token
-            expanded_attention_mask=torch.zeros((kwargs['attention_mask'].shape[0],kwargs['attention_mask'].shape[1]+32+220,kwargs['attention_mask'].shape[2]+32+220)).to(torch.device("cuda"))#初始化一个全mask的mask矩阵
-            expanded_attention_mask[:,:kwargs['attention_mask'].shape[1],:kwargs['attention_mask'].shape[2]]=kwargs['attention_mask']
-
-            expanded_attention_mask[:,:kwargs['attention_mask'].shape[1],kwargs['attention_mask'].shape[2]:]=1#1
-            expanded_attention_mask[:,kwargs['attention_mask'].shape[1]:,50:]=1#2
+            expanded_attention_mask=kwargs['attention_mask']
             #处理region的padding
-            for i in range(0,region_attention_mask.shape[0]):
-                expanded_attention_mask[i,:,kwargs['attention_mask'].shape[1]+32:]=torch.logical_not(region_attention_mask[i])
+            for i in range(0, region_attention_mask.shape[0]):
+                region_length = 220  # 对称区域的长度
+                start_index = kwargs['attention_mask'].shape[1] - region_length
+
+                # 生成一个临时的mask，表示在哪里region_attention_mask为True
+                temp_mask = torch.zeros_like(expanded_attention_mask[i, :, start_index:])
+                temp_mask = torch.where(region_attention_mask[i], torch.zeros_like(temp_mask), temp_mask)
+
+                # 更新 expanded_attention_mask 在最后region_length列
+                expanded_attention_mask[i, :, start_index:] = torch.where(
+                    region_attention_mask[i],  # 条件
+                    torch.zeros_like(expanded_attention_mask[i, :, start_index:]),  # 如果条件为 True，则选用 0（假设True代表mask）
+                    expanded_attention_mask[i, :, start_index:]  # 如果条件为 False，保持原值
+                )
+
+                # 更新 expanded_attention_mask 在最后region_length行
+                # 注意，这里我们使用temp_mask的转置，因为region_attention_mask的形状可能与expanded_attention_mask不匹配
+                # 但在这个上下文中，我们假设它们是匹配的或已经被适当处理以匹配
+                expanded_attention_mask[i, start_index:, :] = torch.where(
+                    region_attention_mask[i].unsqueeze(1),  # 条件，需要增加一个维度以匹配expanded_attention_mask的形状
+                    torch.zeros_like(expanded_attention_mask[i, start_index:, :]),  # 如果条件为 True，则选用 0
+                    expanded_attention_mask[i, start_index:, :]  # 如果条件为 False，保持原值
+                )
+
             kwargs['attention_mask']=expanded_attention_mask
 
 

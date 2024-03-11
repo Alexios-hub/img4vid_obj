@@ -117,9 +117,9 @@ class CaptionTensorizer(object):
         # image features
         img_len = self.max_img_seq_len
 
-        # max_len = self.max_seq_len + self.max_img_seq_len + 32 + 220#加上目标检测结果的最大长度
+        max_len = self.max_seq_len + self.max_img_seq_len + 32 +1 + 220#加上目标检测结果的最大长度，（+1）加一个 sep token在左侧
         # max_len = self.max_seq_len + self.max_img_seq_len + 32#使用帧描述的attention mask长度
-        max_len = self.max_seq_len + self.max_img_seq_len#原始SwinBERT的attention mask长度
+        # max_len = self.max_seq_len + self.max_img_seq_len#原始SwinBERT的attention mask长度
 
         # C: caption, L: label, R: image region
         c_start, c_end = 0, seq_a_len

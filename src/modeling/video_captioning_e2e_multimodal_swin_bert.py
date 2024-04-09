@@ -88,66 +88,6 @@ class VideoFeatureExtractor:
         ])
         self.resnet.eval()
 
-    # def preprocess_and_extract_features(self, frame, bboxes):
-    #     processed_images = []
-    #     bbox_features_list = []
-
-    #     # Preprocess all image regions and collect bbox features
-    #     for bbox in bboxes:
-    #         try:
-    #             xmin, ymin, xmax, ymax = bbox["bbox"]
-    #             frame_image = Image.fromarray(frame.cpu().numpy().astype("uint8"), "RGB").crop((xmin, ymin, xmax, ymax))
-    #             processed_image = self.preprocess(frame_image).to(self.device)
-    #             processed_images.append(processed_image.unsqueeze(0).half())  # Add batch dimension
-    #             bbox_features = torch.tensor(bbox["bbox"], dtype=torch.half, device=self.device)
-    #             bbox_features_list.append(bbox_features.unsqueeze(0))
-    #         except Exception as e:
-    #             print(f"Error preprocessing image region: {e}")
-    #             continue
-
-    #     if not processed_images:  # If no valid images, return empty list
-    #         return []
-
-    #     # Batch process images
-    #     batch_images = torch.cat(processed_images, dim=0)
-    #     batch_bbox_features = torch.cat(bbox_features_list, dim=0)
-
-    #     with torch.no_grad():
-    #         batch_features = self.resnet(batch_images).view(batch_images.size(0), -1)
-    #         combined_features = torch.cat((batch_features, batch_bbox_features), dim=1)
-    #         region_tokens = self.resnet_mlp(combined_features)
-
-    #     return region_tokens
-        
-    # def preprocess_and_extract_features(self, frames, bboxes_list):
-    #     processed_images = []
-    #     bbox_features_list = []
-
-    #     for frame, bboxes in zip(frames, bboxes_list):
-    #         try:
-    #             for bbox in bboxes:
-    #                 xmin, ymin, xmax, ymax = bbox["bbox"]
-    #                 frame_image = Image.fromarray(frame.cpu().numpy().astype("uint8"), "RGB").crop((xmin, ymin, xmax, ymax))
-    #                 processed_image = self.preprocess(frame_image).to(self.device)
-    #                 processed_images.append(processed_image.unsqueeze(0).half())  # Add batch dimension
-    #                 bbox_features = torch.tensor(bbox["bbox"], dtype=torch.half, device=self.device)
-    #                 bbox_features_list.append(bbox_features.unsqueeze(0))
-    #         except Exception as e:
-    #             print(f"Error preprocessing image regions: {e}")
-    #             continue
-
-    #     if not processed_images:  # If no valid images, return empty list
-    #         return []
-
-    #     batch_images = torch.cat(processed_images, dim=0)
-    #     batch_bbox_features = torch.cat(bbox_features_list, dim=0)
-
-    #     with torch.no_grad():
-    #         batch_features = self.resnet(batch_images).view(batch_images.size(0), -1)
-    #         combined_features = torch.cat((batch_features, batch_bbox_features), dim=1)
-    #         region_tokens = self.resnet_mlp(combined_features)
-
-    #     return region_tokens
         
     def preprocess_and_extract_features(self, frames, bboxes_list):
         processed_images = []
@@ -188,7 +128,6 @@ class VideoFeatureExtractor:
         with open(f'datasets/MSRVTT-v2/objects/32frames/filtered/{video_id}.json', 'r') as f:
             obj_dic_filtered = json.load(f)
 
-        frame_indices = []
         frames = []
 
         for frame_idx, bboxes in obj_dic_filtered.items():
@@ -196,31 +135,15 @@ class VideoFeatureExtractor:
             frame = raw_frames[int(frame_idx) - 1]
             frame = torch.permute(frame, (1, 2, 0))  # Adjust frame dimensions if necessary
             frames.append(frame)
-            frame_indices.extend([int(frame_idx) - 1] * len(bboxes))
             # except Exception as e:
             #     print(f"Error processing frame {frame_idx}: {e}")
             #     continue
         tokens, indices_mapping = self.preprocess_and_extract_features(frames, obj_dic_filtered.values())
-        mapped_frame_indices = [frame_indices[i] for i in indices_mapping]
-        return self.prepare_output(tokens, mapped_frame_indices)
+        # mapped_frame_indices = [frame_indices[i] for i in indices_mapping]
 
 
-    def get_region_feats(self, video_id, raw_frames):
-        with open(f'datasets/MSRVTT-v2/objects/32frames/filtered/{video_id}.json', 'r') as f:
-            obj_dic_filtered = json.load(f)
-        frame_indices = []
-        frames = []
-        for frame_idx, bboxes in obj_dic_filtered.items():
-            try:
-                frame = raw_frames[int(frame_idx) - 1]
-                frame = torch.permute(frame, (1, 2, 0))  # Adjust frame dimensions if necessary
-                frames.append(frame)
-                frame_indices.extend([int(frame_idx) - 1] * len(bboxes))
-            except Exception as e:
-                # print(f"Error processing frame {frame_idx}: {e}")
-                continue
-        tokens = self.preprocess_and_extract_features(frames, obj_dic_filtered.values())
-        return self.prepare_output(tokens, frame_indices)
+        # return self.prepare_output(tokens, mapped_frame_indices)
+        return self.prepare_output(tokens, indices_mapping)
 
 
     def pad_sequence(self, tensor, max_len=220):
@@ -276,9 +199,9 @@ class MultimodalTransformer(torch.nn.Module):
         )
         self.obj_region_enc = torch.nn.TransformerEncoder(
             encoder_layer=torch.nn.TransformerEncoderLayer(
-                d_model=768, nhead=12, activation="gelu",batch_first=True
+                d_model=768, nhead=8, activation="gelu",batch_first=True
             ),
-            num_layers=10,
+            num_layers=6,
         )
 
         self.pos_emb = PositionalEmbedding(d_model=768)

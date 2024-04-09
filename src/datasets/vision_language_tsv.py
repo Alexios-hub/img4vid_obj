@@ -395,6 +395,7 @@ class VisionLanguageTSVDataset(object):
         meta_data['raw_frames']=raw_frames
         #传入video_id
         meta_data['video_id']=video_name
+
         if self.is_train:
             pass
         if self.is_train == False:

@@ -150,6 +150,8 @@ def train(args, train_dataloader, val_dataloader, model, tokenizer, training_sav
     else:
         global_step = 0
 
+    global_step = 54270# restore from epoch10
+
     TB_LOGGER.global_step = global_step
     if not is_main_process() or args.restore_ratio <= 0:
         restorer = NoOp()
@@ -176,9 +178,10 @@ def train(args, train_dataloader, val_dataloader, model, tokenizer, training_sav
             'input_ids': batch[0], 'attention_mask': batch[1],
             'token_type_ids': batch[2], 'img_feats': batch[3],
             'masked_pos': batch[4], 'masked_ids': batch[5],
-
+            
             'frames_cap_ids':frames_cap_ids,
             'frames_cap_attention_masks':frames_cap_attention_masks,
+
 
             'raw_frames':raw_frames,
             'video_id':video_id,
